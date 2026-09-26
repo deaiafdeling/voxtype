@@ -2684,6 +2684,11 @@ impl Daemon {
             Ok(Ok(text)) => {
                 if text.is_empty() {
                     tracing::debug!("Transcription was empty");
+                    // An empty transcription is still a completed recording
+                    // session: return focus to the start window so the user
+                    // ends up where they began, not wherever they wandered
+                    // while speaking. Cancel paths skip this deliberately.
+                    self.restore_start_window().await;
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
@@ -3004,6 +3009,7 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                self.restore_start_window().await;
                 self.reset_to_idle(state).await;
             }
             Err(e) => {
@@ -3037,11 +3043,16 @@ impl Daemon {
                     // get_transcriber_for_recording re-creates it on the
                     // next recording.
                     if self.transcriber_preloaded.take().is_some() {
+                        tracing::debug!("Discarded poisoned preloaded transcriber");
                         tracing::warn!(
                             "Dropped the preloaded transcriber after the panic; \
                              the next recording will re-create it"
                         );
                     }
+                    // A panicked transcription task still ends the recording
+                    // session: hand focus back to the start window. The cancel
+                    // branch above deliberately skips this.
+                    self.restore_start_window().await;
                 }
                 self.reset_to_idle(state).await;
             }
