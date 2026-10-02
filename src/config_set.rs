@@ -242,30 +242,61 @@ pub fn unset_key(path: PathBuf, key: &str) -> Result<SetOutcome, ConfigSetError>
     })
 }
 
-/// Merge `(from, to)` pairs into `[text.replacements]`, overwriting existing
-/// keys with the same spoken form. One save, comments preserved.
+/// Merge the corrected spellings from `(from, to)` pairs into
+/// `whisper.initial_prompt`, Whisper's vocabulary hint.
 ///
-/// Keys may contain spaces or punctuation (`"omaar gielen"`, `"niet."`);
-/// they are written as quoted TOML keys rather than dotted `config set`
-/// paths, which reject `.` in the map tail.
-pub fn merge_replacements(
+/// The hint is the system-prompt pattern: instead of post-hoc key/value
+/// substitutions, the corrected terms are prepended to Whisper's context so
+/// the model itself prefers the right spelling. Terms are stored as a
+/// comma-separated list, deduplicated case-insensitively, order-preserving,
+/// capped at [`MAX_HINT_TERMS`] (oldest evicted first). Comments and
+/// unrelated fields are preserved via `ConfigEditor`.
+pub fn merge_hint_terms(
     path: PathBuf,
     pairs: &[(String, String)],
 ) -> Result<PathBuf, ConfigSetError> {
     let spec = schema::CONFIG_KEYS
         .iter()
-        .find(|s| s.table == schema::REPLACEMENTS_TABLE)
-        .expect("text.replacements is in the schema allowlist");
+        .find(|s| s.key == "whisper.initial_prompt")
+        .expect("whisper.initial_prompt is in the schema allowlist");
     let mut editor = ConfigEditor::load_from_path(path)?;
-    for (from, to) in pairs {
-        let found = schema::Found::MapEntry {
-            spec,
-            entry: from.clone(),
-        };
-        schema::apply(&mut editor, &found, &schema::TypedValue::Str(to.clone()));
-    }
+    let existing = editor
+        .get_string("whisper", "initial_prompt")
+        .unwrap_or_default();
+    let merged = merge_hint_list(&existing, pairs.iter().map(|(_, to)| to.as_str()));
+    let found = schema::Found::Key(spec);
+    schema::apply(&mut editor, &found, &schema::TypedValue::Str(merged));
     editor.save()?;
     Ok(editor.path().to_path_buf())
+}
+
+/// Cap on hint terms kept in `whisper.initial_prompt`. Whisper truncates the
+/// prompt to its context window anyway; this keeps the config readable.
+pub const MAX_HINT_TERMS: usize = 40;
+
+/// Merge `new_terms` into the existing comma-separated hint list: dedupe
+/// case-insensitively (new spelling wins), append newest last, evict oldest
+/// past [`MAX_HINT_TERMS`].
+fn merge_hint_list<'a, I: Iterator<Item = &'a str>>(existing: &str, new_terms: I) -> String {
+    let mut terms: Vec<String> = existing
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    for term in new_terms {
+        let term = term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        if let Some(pos) = terms.iter().position(|t| t.eq_ignore_ascii_case(term)) {
+            terms.remove(pos);
+        }
+        terms.push(term.to_string());
+    }
+    if terms.len() > MAX_HINT_TERMS {
+        terms.drain(0..terms.len() - MAX_HINT_TERMS);
+    }
+    terms.join(", ")
 }
 
 #[cfg(test)]
@@ -698,43 +729,54 @@ mod tests {
     }
 
     #[test]
-    fn merge_replacements_overwrites_existing_and_preserves_comments() {
-        let mut base = crate::config::default_config_content();
-        base.push_str(
-            "\n# keep this replacements comment\n[text.replacements]\n\"omaar gielen\" = \"old value\"\n\"btw\" = \"by the way\"\n",
-        );
-        let (_dir, path) = temp_config(&base);
-        merge_replacements(
+    fn merge_hint_terms_appends_dedupes_and_preserves_comments() {
+        // The default config already has a [whisper] table with a commented
+        // initial_prompt line — learn must write into that table, not append
+        // a duplicate one.
+        let (_dir, path) = temp_config(&crate::config::default_config_content());
+        merge_hint_terms(
             path.clone(),
-            &[
-                ("omaar gielen".to_string(), "Omarchy menu".to_string()),
-                ("oh marky".to_string(), "Omarchy".to_string()),
-            ],
+            &[("oh marky".to_string(), "Omarchy menu".to_string())],
         )
         .unwrap();
+        merge_hint_terms(path.clone(), &[("fox".to_string(), "voxtype".to_string())]).unwrap();
 
         let cfg = reload(&path);
-        assert_eq!(
-            cfg.text
-                .replacements
-                .get("omaar gielen")
-                .map(String::as_str),
-            Some("Omarchy menu"),
-            "existing key must be overwritten"
+        let prompt = cfg.whisper.initial_prompt.as_deref().unwrap_or_default();
+        assert!(prompt.contains("voxtype"), "new term missing: {prompt}");
+        assert!(
+            prompt.contains("Omarchy menu"),
+            "existing term lost: {prompt}"
         );
+        // A repeat of an existing term must not duplicate it.
+        merge_hint_terms(path.clone(), &[("x".to_string(), "voxtype".to_string())]).unwrap();
+        let cfg = reload(&path);
+        let prompt = cfg.whisper.initial_prompt.as_deref().unwrap_or_default();
         assert_eq!(
-            cfg.text.replacements.get("oh marky").map(String::as_str),
-            Some("Omarchy")
-        );
-        assert_eq!(
-            cfg.text.replacements.get("btw").map(String::as_str),
-            Some("by the way"),
-            "unrelated entries must survive"
+            prompt
+                .split(',')
+                .filter(|t| t.trim().eq_ignore_ascii_case("voxtype"))
+                .count(),
+            1,
+            "duplicate term: {prompt}"
         );
         let after = fs::read_to_string(&path).unwrap();
         assert!(
-            after.contains("# keep this replacements comment"),
+            after.contains("# Initial prompt to provide context for transcription"),
             "comment lost: {after}"
         );
+    }
+
+    #[test]
+    fn merge_hint_list_evicts_oldest_past_cap() {
+        let existing = (0..MAX_HINT_TERMS)
+            .map(|i| format!("t{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let merged = merge_hint_list(&existing, std::iter::once("new"));
+        let terms: Vec<&str> = merged.split(", ").collect();
+        assert_eq!(terms.len(), MAX_HINT_TERMS);
+        assert_eq!(terms[0], "t1", "oldest must be evicted");
+        assert_eq!(terms[terms.len() - 1], "new", "newest must be last");
     }
 }

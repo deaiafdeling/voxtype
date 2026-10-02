@@ -245,7 +245,7 @@ Voxtype can post-process transcribed text with word replacements and spoken punc
 replacements = { "vox type" = "voxtype", "oh marky" = "Omarchy" }
 ```
 
-Or grow the table from a real correction: fix the typed text, select it, and run `voxtype learn --from-selection`.
+Or teach Whisper the right spelling from a real correction: fix the typed text, select it, and run `voxtype learn --from-selection` — the corrected terms join Whisper's `initial_prompt` vocabulary hint.
 
 **Spoken punctuation** (opt-in) converts spoken words to symbols - useful for developers:
 

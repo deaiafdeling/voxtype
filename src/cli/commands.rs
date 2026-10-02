@@ -169,18 +169,20 @@ pub enum Commands {
         action: MeetingAction,
     },
 
-    /// Teach [text.replacements] from an edited dictation
+    /// Teach Whisper a vocabulary hint from an edited dictation
     ///
     /// Diffs the corrected text against the last transcript and merges
-    /// only word/phrase replacements into the config file. Inserts and
-    /// deletes are ignored. Low-similarity selections are refused so a
-    /// random highlight cannot poison the dictionary.
+    /// the corrected spellings into whisper.initial_prompt, Whisper's
+    /// system-prompt-style vocabulary hint. Inserts and deletes are
+    /// ignored. Low-similarity selections are refused so a random
+    /// highlight cannot poison the hint.
     #[command(long_about = "\
-        Teach [text.replacements] from an edited dictation\n\n\
+        Teach Whisper a vocabulary hint from an edited dictation\n\n\
         Reads the corrected text (Wayland primary selection by default, \
         falling back to the clipboard), diffs it against the last \
-        transcript, and writes replace-opcode phrases into \
-        [text.replacements], preserving comments.\n\n\
+        transcript, and merges the corrected spellings into \
+        whisper.initial_prompt (a comma-separated hint list), preserving \
+        comments.\n\n\
         The last transcript is the file the daemon writes after each \
         dictation ($XDG_RUNTIME_DIR/voxtype/last-transcript). If that \
         file is missing, the last tracing line `Transcribed: \"...\"` \

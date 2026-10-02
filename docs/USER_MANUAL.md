@@ -394,7 +394,7 @@ This command is designed for use with compositor keybindings (Hyprland, Sway) in
 
 ### `voxtype learn`
 
-Teach `[text.replacements]` from an edited dictation. Dictate, fix the typed
+Teach Whisper a vocabulary hint from an edited dictation. Dictate, fix the typed
 text, select the correction, and run:
 
 ```bash
@@ -407,10 +407,11 @@ echo 'Het Omarchy menu doet het niet.' | voxtype learn --from-stdin
 The command diffs the corrected text against the last transcript (the file the
 daemon writes to `$XDG_RUNTIME_DIR/voxtype/last-transcript`, or the last
 `Transcribed: "..."` line in `journalctl --user -u voxtype`), keeps only
-replace-opcode phrases, and merges them into the config file while preserving
-comments. Identical text and insert/delete-only diffs exit 0 with a message.
-An empty selection, a missing transcript, or similarity below 0.35 exits 1 so
-a random highlight cannot poison the dictionary.
+replace-opcode phrases, and merges the corrected spellings into
+`whisper.initial_prompt` — Whisper's system-prompt-style vocabulary hint —
+while preserving comments. Identical text and insert/delete-only diffs exit 0
+with a message. An empty selection, a missing transcript, or similarity below
+0.35 exits 1 so a random highlight cannot poison the hint.
 
 Hyprland example:
 

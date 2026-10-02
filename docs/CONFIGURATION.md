@@ -2997,7 +2997,7 @@ You can also grow this table from a real correction instead of editing TOML by h
 voxtype learn --from-selection
 ```
 
-That diffs the selection against the last transcript, writes only word/phrase replacements (inserts and deletes are ignored), and restarts the daemon. A random selection that barely resembles the last transcript is refused. See [`voxtype learn`](USER_MANUAL.md#voxtype-learn).
+That diffs the selection against the last transcript and merges the corrected spellings into `whisper.initial_prompt`, Whisper's vocabulary hint (inserts and deletes are ignored), then restarts the daemon. A random selection that barely resembles the last transcript is refused. See [`voxtype learn`](USER_MANUAL.md#voxtype-learn).
 
 ### smart_auto_submit
 

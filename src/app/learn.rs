@@ -1,4 +1,4 @@
-//! `voxtype learn` — teach `[text.replacements]` from an edited dictation.
+//! `voxtype learn` — teach `whisper.initial_prompt` from an edited dictation.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -71,7 +71,7 @@ pub(crate) async fn run_learn(
         }
         LearnDiff::Replacements(pairs) => {
             let path = resolve_config_path_for_write(cli_config)?;
-            let written = match config_set::merge_replacements(path, &pairs) {
+            let written = match config_set::merge_hint_terms(path, &pairs) {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -80,9 +80,13 @@ pub(crate) async fn run_learn(
             };
 
             for (from, to) in &pairs {
-                println!("Learned \"{from}\" = \"{to}\"");
+                println!("Learned \"{from}\" -> hint \"{to}\"");
             }
-            println!("Wrote {} in {}", pairs.len(), written.display());
+            println!(
+                "Wrote {} terms into whisper.initial_prompt in {}",
+                pairs.len(),
+                written.display()
+            );
 
             restart_daemon();
             notify_learned(&pairs).await;
@@ -168,13 +172,13 @@ fn restart_daemon() {
 async fn notify_learned(pairs: &[(String, String)]) {
     let body = pairs
         .iter()
-        .map(|(from, to)| format!("\"{from}\" → \"{to}\""))
+        .map(|(_, to)| format!("\"{to}\""))
         .collect::<Vec<_>>()
-        .join("\n");
+        .join(", ");
     let title = if pairs.len() == 1 {
-        "Voxtype learned a replacement"
+        "Voxtype learned a hint"
     } else {
-        "Voxtype learned replacements"
+        "Voxtype learned hints"
     };
     notification::send(title, &body).await;
 }
