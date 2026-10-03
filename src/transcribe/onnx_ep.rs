@@ -53,14 +53,13 @@ fn compiled_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
     #[allow(unused_mut)]
     let mut providers: Vec<(&'static str, ExecutionProviderDispatch)> = Vec::new();
 
-    #[cfg(feature = "onnx-tensorrt-enabled")]
+    // With `onnx-load-dynamic`, ORT is dlopened at runtime and EP support is
+    // determined by the loaded dylib, not the compile — so the CUDA EP can be
+    // attempted whenever the dynamic backend is in play. Registration failure
+    // (e.g. missing cuDNN) falls through to CPU per the contract above.
+    #[cfg(any(feature = "onnx-cuda-enabled", feature = "onnx-load-dynamic"))]
     {
-        use ort::execution_providers::{ExecutionProvider, TensorRTExecutionProvider};
-        providers.push(("TensorRT", TensorRTExecutionProvider::default().build()));
-    }
-    #[cfg(feature = "onnx-cuda-enabled")]
-    {
-        use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
+        use ort::execution_providers::CUDAExecutionProvider;
         providers.push(("CUDA", CUDAExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-migraphx-enabled")]
