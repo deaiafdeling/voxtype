@@ -358,6 +358,16 @@ impl ModelManager {
             .map(|s| s.as_str())
             .collect()
     }
+
+    /// Clone of the primary model's transcriber, if it is loaded.
+    ///
+    /// Used to run a one-time GPU warmup in the background right after
+    /// startup preload, so the first real dictation is as fast as the rest.
+    pub fn primary_transcriber(&self) -> Option<Arc<dyn Transcriber>> {
+        self.loaded_models
+            .get(&self.config.model)
+            .map(|m| Arc::clone(&m.transcriber))
+    }
 }
 
 #[cfg(test)]

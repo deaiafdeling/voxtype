@@ -849,12 +849,15 @@ impl TextOutput for PasteOutput {
         // Step 1: Copy to clipboard
         self.copy_to_clipboard(&text_to_paste).await?;
 
-        // Pre-paste delay to ensure clipboard is set before pasting
-        // Default to 100ms if not configured (minimum needed for reliability)
+        // Pre-paste delay to ensure clipboard is set before pasting.
+        // wl-copy has already exited successfully by the time we get here, so
+        // the clipboard offer is live; this is just a small grace period for
+        // apps that poll the clipboard lazily. 20ms keeps that safety margin
+        // without taxing every dictation (was a flat 100ms).
         let delay = if self.pre_type_delay_ms > 0 {
             self.pre_type_delay_ms
         } else {
-            100
+            20
         };
         tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
 

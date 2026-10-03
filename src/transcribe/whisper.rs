@@ -12,12 +12,27 @@ use crate::config::{Config, LanguageConfig, WhisperConfig};
 use crate::error::TranscribeError;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
+
+/// Maximum pooled inference states per model context.
+///
+/// A WhisperState holds the KV cache + compute buffers (~350 MB on large-v3).
+/// Allocating one per transcription shows up as repeated `whisper_init_state`
+/// spam and adds measurable latency to every dictation. The daemon serializes
+/// transcriptions per model (eager chunks run a couple in parallel), so a
+/// small pool covers all realistic concurrency; extra requests fall back to
+/// creating a transient state exactly like the old code path.
+const STATE_POOL_MAX: usize = 3;
 
 /// Whisper-based transcriber
 pub struct WhisperTranscriber {
     /// Whisper context (holds the model)
     ctx: WhisperContext,
+    /// Reusable inference states, kept warm between transcriptions to avoid
+    /// re-allocating ~350 MB of KV/compute buffers per dictation.
+    state_pool: Mutex<Vec<WhisperState>>,
     /// Language configuration (single, auto, or array)
     language: LanguageConfig,
     /// Whether to translate to English
@@ -68,6 +83,7 @@ impl WhisperTranscriber {
 
         Ok(Self {
             ctx,
+            state_pool: Mutex::new(Vec::new()),
             language: config.language.clone(),
             translate: config.translate,
             threads,
@@ -142,17 +158,39 @@ impl WhisperTranscriber {
         params
     }
 
+    /// Get a state from the pool, or create a new one when the pool is empty.
+    ///
+    /// A returned state must be given back via [`Self::return_state`] (or
+    /// dropped to discard it, e.g. after a panic-suspect inference run).
+    fn take_state(&self) -> Result<WhisperState, TranscribeError> {
+        if let Ok(mut pool) = self.state_pool.lock() {
+            if let Some(state) = pool.pop() {
+                return Ok(state);
+            }
+        }
+        self.ctx
+            .create_state()
+            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))
+    }
+
+    /// Return a state to the pool for reuse. States are dropped once the pool
+    /// exceeds [`STATE_POOL_MAX`] so long eager-chunk bursts don't balloon VRAM.
+    fn return_state(&self, state: WhisperState) {
+        if let Ok(mut pool) = self.state_pool.lock() {
+            if pool.len() < STATE_POOL_MAX {
+                pool.push(state);
+            }
+        }
+    }
+
     fn run_full(
         &self,
+        state: &mut WhisperState,
         samples: &[f32],
         selected_language: Option<&str>,
         duration_secs: f32,
         retry: bool,
     ) -> Result<String, TranscribeError> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
         let params = self.build_params(selected_language, duration_secs, retry);
 
         state
@@ -249,11 +287,10 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
+        // Reuse a pooled state when available. whisper.cpp resets the KV cache
+        // at the start of each whisper_full() run, so reuse is safe; the win is
+        // skipping ~350 MB of buffer allocation + GPU upload per dictation.
+        let mut state = self.take_state()?;
 
         // Determine language based on configuration mode
         let selected_language: Option<String> = if self.language.is_auto() {
@@ -281,28 +318,49 @@ impl Transcriber for WhisperTranscriber {
             *guard = selected_language.clone();
         }
 
-        let mut result =
-            self.run_full(samples, selected_language.as_deref(), duration_secs, false)?;
+        let run = |state: &mut WhisperState, retry: bool| -> Result<String, TranscribeError> {
+            self.run_full(
+                state,
+                samples,
+                selected_language.as_deref(),
+                duration_secs,
+                retry,
+            )
+        };
 
-        if duration_secs >= 1.0 && is_degenerate_transcript(&result) {
+        let mut result = run(&mut state, false);
+
+        if duration_secs >= 1.0
+            && result
+                .as_deref()
+                .map(is_degenerate_transcript)
+                .unwrap_or(false)
+        {
+            let result_text = result.unwrap_or_default();
             tracing::warn!(
                 "Whisper returned degenerate transcript {:?} for {:.2}s audio; retrying with beam search",
-                result,
+                result_text,
                 duration_secs
             );
-            let retry_result =
-                self.run_full(samples, selected_language.as_deref(), duration_secs, true)?;
-            if is_degenerate_transcript(&retry_result) {
-                tracing::warn!(
-                    "Whisper retry also returned degenerate transcript {:?}; treating as empty",
-                    retry_result
-                );
-                result.clear();
-            } else {
-                tracing::info!("Whisper retry recovered transcript");
-                result = retry_result;
+            match run(&mut state, true) {
+                Ok(retry_result) if !is_degenerate_transcript(&retry_result) => {
+                    tracing::info!("Whisper retry recovered transcript");
+                    result = Ok(retry_result);
+                }
+                retry_result => {
+                    let msg = match &retry_result {
+                        Ok(text) => format!("degenerate transcript {:?}", text),
+                        Err(e) => format!("retry failed: {}", e),
+                    };
+                    tracing::warn!("Whisper retry also returned {}; treating as empty", msg);
+                    result = Ok(String::new());
+                }
             }
         }
+
+        self.return_state(state);
+
+        let result = result?;
 
         tracing::info!(
             "Transcription completed in {:.2}s: {:?}",
@@ -319,6 +377,41 @@ impl Transcriber for WhisperTranscriber {
 
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn warmup(&self) {
+        // A sub-minimum-context clip keeps this cheap (audio_ctx floor is 384,
+        // ~7.7s of compute window, ~0.2s on an RTX 3090). The point is to trip
+        // lazy GPU pipeline compilation — notably Vulkan shader builds on the
+        // first full() — so the user's first real dictation is instant. The
+        // state goes back into the pool already warm.
+        let start = std::time::Instant::now();
+        let silence = vec![0.0f32; 3200]; // 0.2s of silence
+        match self.take_state() {
+            Ok(mut state) => {
+                let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                params.set_n_threads(self.threads as i32);
+                params.set_print_special(false);
+                params.set_print_progress(false);
+                params.set_print_realtime(false);
+                params.set_print_timestamps(false);
+                params.set_suppress_blank(true);
+                params.set_suppress_nst(true);
+                params.set_no_context(true);
+                params.set_audio_ctx(384);
+                if state.full(params, &silence).is_ok() {
+                    self.return_state(state);
+                    tracing::info!(
+                        "Whisper warmup inference completed in {:.2}s (GPU pipelines compiled)",
+                        start.elapsed().as_secs_f32()
+                    );
+                } else {
+                    // Drop the state rather than pooling something suspect
+                    tracing::warn!("Whisper warmup inference failed; pool stays cold");
+                }
+            }
+            Err(e) => tracing::warn!("Whisper warmup state creation failed: {}", e),
+        }
     }
 }
 

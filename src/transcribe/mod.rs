@@ -131,6 +131,16 @@ pub trait Transcriber: Send + Sync {
         // Default: no-op
     }
 
+    /// One-time warmup so the first real dictation is as fast as the rest.
+    ///
+    /// GPU backends (notably Vulkan) compile inference pipelines lazily on
+    /// the first `full()` call, which can take seconds. Backends that
+    /// benefit run a tiny dummy inference here, typically right after model
+    /// load at daemon startup. Default: no-op.
+    fn warmup(&self) {
+        // Default: no-op
+    }
+
     /// Streaming-capable view of this transcriber, if it supports streaming.
     ///
     /// Returns `None` by default. Streaming-capable backends override this to

@@ -3348,6 +3348,12 @@ impl Daemon {
                             tracing::error!("Failed to preload model: {}", e);
                             return Err(crate::error::VoxtypeError::Transcribe(e));
                         }
+                        // Warm up GPU inference pipelines in the background so
+                        // the first dictation after login is instant instead of
+                        // paying Vulkan shader compilation (~5s on first run).
+                        if let Some(t) = model_manager.primary_transcriber() {
+                            tokio::task::spawn_blocking(move || t.warmup());
+                        }
                     }
                 }
                 crate::config::TranscriptionEngine::Parakeet
