@@ -2692,7 +2692,6 @@ impl Daemon {
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
-                    crate::text::learn::record_last_transcript(&text);
 
                     // Apply text processing (replacements, punctuation)
                     let processed_text = self.text_processor.process(&text);
@@ -2809,6 +2808,16 @@ impl Daemon {
 
                     // Track last dictation for context in subsequent post-processing
                     self.last_dictation = Some((final_text.clone(), Instant::now()));
+
+                    // `voxtype learn` (SUPER+SHIFT+L) diffs its baseline against
+                    // the text the user actually SEES and edits — the final
+                    // text after replacements AND the polish chain. Recording
+                    // the raw whisper transcript instead (old behavior) taught
+                    // the polish chain's own edits back as hints: LanguageTool
+                    // nl-NL deterministically rewrites `commit` -> `commis`,
+                    // and selecting the pasted text then learned that corrupt
+                    // spelling as canonical (Oct 8 incident).
+                    crate::text::learn::record_last_transcript(&final_text);
 
                     if smart_submit {
                         tracing::debug!(
